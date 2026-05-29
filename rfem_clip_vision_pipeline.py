@@ -87,6 +87,9 @@ rcParams.update({
     "savefig.bbox":    "tight",
 })
 
+# Consistent quantized diverging colormap: blue = min, red = max (9 discrete levels)
+MATRIX_CMAP = plt.cm.Reds.resampled(9)
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Paths & config
@@ -201,21 +204,28 @@ def plot_overlay(image_disp, cls_row, title="", with_values=False,
     μ and σ of the 49 patch scores go in the title.
     """
     fig, ax = plt.subplots(figsize=figsize)
-    ax.imshow(image_disp)
+
+    # Slightly darken background so low-attention areas have a cool tint
+    darkened = (image_disp.astype(np.float32) * 0.6).clip(0, 255).astype(np.uint8)
+    ax.imshow(darkened)
 
     spatial      = cls_row_to_spatial(cls_row)
     patch_scores = cls_row_to_patch_grid(cls_row)
 
-    if use_power_norm:
-        sp_vmin = float(spatial.min())
-        sp_vmax = float(spatial.max())
-        if sp_vmax <= sp_vmin:
-            sp_vmax = sp_vmin + 1e-9
-        ax.imshow(spatial, cmap=COLORMAP, alpha=0.55,
-                  norm=PowerNorm(gamma=POWER_NORM_GAMMA,
-                                  vmin=sp_vmin, vmax=sp_vmax))
-    else:
-        ax.imshow(spatial, cmap=COLORMAP, alpha=0.55)
+    # Variable-alpha overlay: alpha scales with normalized attention value.
+    # Low patches → nearly transparent (image visible), high patches → 65% opaque jet.
+    sp_min = float(spatial.min())
+    sp_max = float(spatial.max())
+    if sp_max <= sp_min:
+        sp_max = sp_min + 1e-9
+
+    norm_spatial = (spatial - sp_min) / (sp_max - sp_min)
+    alpha_map    = (norm_spatial ** 0.5) * 0.65
+
+    cmap_fn  = plt.get_cmap(COLORMAP)
+    rgba     = cmap_fn(norm_spatial)
+    rgba[..., 3] = alpha_map
+    ax.imshow(rgba)
 
     if with_values:
         max_v = patch_scores.max() if patch_scores.max() > 0 else 1.0
@@ -244,8 +254,10 @@ def plot_overlay(image_disp, cls_row, title="", with_values=False,
 
 
 def plot_matrix_heatmap(matrix, title="", figsize=(11, 9),
-                        annotate=False, cmap="magma", save_name=None,
+                        annotate=False, cmap=None, save_name=None,
                         use_power_norm=True):
+    if cmap is None:
+        cmap = MATRIX_CMAP
     """50x50 attention matrix (or smaller). μ/σ in title."""
     if isinstance(matrix, torch.Tensor):
         matrix = matrix.detach().cpu().numpy()
@@ -440,12 +452,12 @@ def plot_per_layer_rollout_grid(per_layer_mats, title_prefix="", save_name=None,
             continue
         mat = mats[layer_idx]
         if use_power_norm:
-            im = ax.imshow(mat, cmap="magma", aspect="auto",
+            im = ax.imshow(mat, cmap=MATRIX_CMAP, aspect="auto",
                             interpolation="nearest",
                             norm=PowerNorm(gamma=POWER_NORM_GAMMA,
                                             vmin=vmin, vmax=pn_vmax))
         else:
-            im = ax.imshow(mat, cmap="magma", aspect="auto",
+            im = ax.imshow(mat, cmap=MATRIX_CMAP, aspect="auto",
                             interpolation="nearest",
                             vmin=vmin, vmax=pn_vmax)
         last_im = im
@@ -480,16 +492,20 @@ def plot_k_sweep_overlays(image_disp, scores_by_k, k_values, title_prefix="",
     """1xK strip of overlays, one per K value."""
     fig, axes = plt.subplots(1, len(k_values), figsize=(len(k_values) * 8, 8))
     for ax, K in zip(axes, k_values):
-        ax.imshow(image_disp)
         cls_row = scores_by_k[K]
         spatial = cls_row_to_spatial(cls_row)
-        sp_vmin = float(spatial.min())
-        sp_vmax = float(spatial.max())
-        if sp_vmax <= sp_vmin:
-            sp_vmax = sp_vmin + 1e-9
-        ax.imshow(spatial, cmap=COLORMAP, alpha=0.55,
-                  norm=PowerNorm(gamma=POWER_NORM_GAMMA,
-                                  vmin=sp_vmin, vmax=sp_vmax))
+        sp_min  = float(spatial.min())
+        sp_max  = float(spatial.max())
+        if sp_max <= sp_min:
+            sp_max = sp_min + 1e-9
+        darkened = (image_disp.astype(np.float32) * 0.6).clip(0, 255).astype(np.uint8)
+        ax.imshow(darkened)
+        norm_spatial = (spatial - sp_min) / (sp_max - sp_min)
+        alpha_map    = (norm_spatial ** 0.5) * 0.65
+        cmap_fn      = plt.get_cmap(COLORMAP)
+        rgba         = cmap_fn(norm_spatial)
+        rgba[..., 3] = alpha_map
+        ax.imshow(rgba)
         ax.set_title(f"K = {K}", fontsize=TITLE_SZ + 2, fontweight="bold", pad=10)
         ax.axis("off")
 
@@ -843,6 +859,22 @@ def process_image(image_path: Path):
         save_name="03_rfem_step1_per_head/all12heads_grid",
     )
 
+    # Individual per-head rolled matrices + CLS overlays (for slides)
+    for h in range(head_rollouts.shape[0]):
+        mu_h, sig_h = stats[h]
+        plot_matrix_heatmap(
+            head_rollouts[h],
+            title=f"{img_id} Step 1 — Per-head rollout  (Head {h + 1})\n"
+                  f"$\\mu = {mu_h:.5f}$     $\\sigma = {sig_h:.6f}$",
+            save_name=f"03_rfem_step1_per_head/head{h + 1:02d}_matrix",
+        )
+        plot_overlay(
+            image_disp, head_rollouts[h][0],
+            title=f"{img_id} Step 1 — Per-head CLS overlay  (Head {h + 1})\n"
+                  f"$\\mu = {mu_h:.5f}$     $\\sigma = {sig_h:.6f}$",
+            save_name=f"03_rfem_step1_per_head/head{h + 1:02d}_overlay",
+        )
+
     scores_by_k = {}
 
     for K in K_VALUES:
@@ -855,7 +887,6 @@ def process_image(image_path: Path):
         plot_matrix_heatmap(
             head_masks[HEAD_TO_SHOW],
             title=f"{img_id} Step 2 — Head {HEAD_TO_SHOW + 1} K-σ filtered (values kept)  (K={K})",
-            cmap="magma",
             save_name=f"04_rfem_step2_filter/K{K}/mask_h{HEAD_TO_SHOW + 1}_matrix",
         )
         plot_overlay(

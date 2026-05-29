@@ -64,6 +64,9 @@ rcParams.update({
     "savefig.bbox":    "tight",
 })
 
+# Consistent quantized diverging colormap: blue = min, red = max (9 discrete levels)
+MATRIX_CMAP = plt.cm.Reds.resampled(9)
+
 OUT_DIR          = Path(__file__).resolve().parent / "figs_pdf_clip"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 _CURRENT_OUT_DIR = OUT_DIR
@@ -144,8 +147,10 @@ def save_fig_pdf(fig, name: str):
 # Plot helpers — μ/σ in title, big fonts, one figure per PDF
 # ──────────────────────────────────────────────────────────────────────────────
 def plot_matrix_heatmap(matrix, labels=None, title="", figsize=(11, 9),
-                        annotate=True, cmap="Blues", show_stats=True,
+                        annotate=True, cmap=None, show_stats=True,
                         stats_mask=None, save_name=None):
+    if cmap is None:
+        cmap = MATRIX_CMAP
     """
     Single matrix heatmap.
     `stats_mask` (optional bool ndarray of same shape as matrix): if given,
@@ -264,7 +269,7 @@ def plot_all_head_matrices(rolled, stats, tokens, title_prefix="",
         mat     = rolled_np[h]
         mu, sig = stats[h]
 
-        im = ax.imshow(mat, aspect="auto", cmap="Blues")
+        im = ax.imshow(mat, aspect="auto", cmap=MATRIX_CMAP)
         ax.set_title(
             f"Head {h + 1}\n$\\mu = {mu:.5f}$     $\\sigma = {sig:.6f}$",
             fontsize=TITLE_SZ, fontweight="bold", pad=10
@@ -720,6 +725,18 @@ def process_sentence(sid, text, label):
         save_name=f"{sid}_M3_step1_all_heads_grid",
     )
 
+    # Individual per-head rolled matrices (for slides)
+    for h in range(head_rollouts.shape[0]):
+        mu_h, sig_h = stats[h]
+        plot_matrix_heatmap(
+            head_rollouts[h], labels=tokens_disp,
+            title=f"{sid} Step 1 — Per-head rollout  (Head {h + 1})\n"
+                  f"$\\mu = {mu_h:.5f}$     $\\sigma = {sig_h:.6f}$",
+            show_stats=False,
+            stats_mask=tril_np,
+            save_name=f"{sid}_M3_step1_head{h + 1:02d}_matrix",
+        )
+
     # EOS-row slices over the same filtered token set
     keep_idx = [i for i, t in enumerate(tokens) if not is_droppable(t)]
     vanilla_plot         = eos_row[keep_idx]
@@ -775,7 +792,6 @@ def process_sentence(sid, text, label):
         plot_matrix_heatmap(
             head_masks[HEAD_TO_SHOW], labels=tokens_disp,
             title=f"{sid} Step 2 — Head {HEAD_TO_SHOW + 1} K-σ filtered (values kept)  (K={K})",
-            cmap="Greens",
             stats_mask=tril_np,
             save_name=f"{sid}_M3_step2_mask_h{HEAD_TO_SHOW + 1}_K{K}",
         )
